@@ -45,153 +45,6 @@ import torch.nn as nn
 output_dir = "outputs"
 ensure_dirname(output_dir)
 
-
-class ForwardWarp(nn.Module):
-    """docstring for WarpLayer"""
-
-    def __init__(
-        self,
-    ):
-        super(ForwardWarp, self).__init__()
-
-    def forward(self, img, flo):
-        """
-        -img: image (N, C, H, W)
-        -flo: optical flow (N, 2, H, W)
-        elements of flo is in [0, H] and [0, W] for dx, dy
-
-        """
-
-        # (x1, y1)		(x1, y2)
-        # +---------------+
-        # |				  |
-        # |	o(x, y) 	  |
-        # |				  |
-        # |				  |
-        # |				  |
-        # |				  |
-        # +---------------+
-        # (x2, y1)		(x2, y2)
-
-        N, C, _, _ = img.size()
-
-        # translate start-point optical flow to end-point optical flow
-        y = flo[:, 0:1:, :]
-        x = flo[:, 1:2, :, :]
-
-        x = x.repeat(1, C, 1, 1)
-        y = y.repeat(1, C, 1, 1)
-
-        # Four point of square (x1, y1), (x1, y2), (x2, y1), (y2, y2)
-        x1 = torch.floor(x)
-        x2 = x1 + 1
-        y1 = torch.floor(y)
-        y2 = y1 + 1
-
-        # firstly, get gaussian weights
-        w11, w12, w21, w22 = self.get_gaussian_weights(x, y, x1, x2, y1, y2)
-
-        # secondly, sample each weighted corner
-        img11, o11 = self.sample_one(img, x1, y1, w11)
-        img12, o12 = self.sample_one(img, x1, y2, w12)
-        img21, o21 = self.sample_one(img, x2, y1, w21)
-        img22, o22 = self.sample_one(img, x2, y2, w22)
-
-        imgw = img11 + img12 + img21 + img22
-        o = o11 + o12 + o21 + o22
-
-        return imgw, o
-
-    def get_gaussian_weights(self, x, y, x1, x2, y1, y2):
-        w11 = torch.exp(-((x - x1) ** 2 + (y - y1) ** 2))
-        w12 = torch.exp(-((x - x1) ** 2 + (y - y2) ** 2))
-        w21 = torch.exp(-((x - x2) ** 2 + (y - y1) ** 2))
-        w22 = torch.exp(-((x - x2) ** 2 + (y - y2) ** 2))
-
-        return w11, w12, w21, w22
-
-    def sample_one(self, img, shiftx, shifty, weight):
-        """
-        Input:
-                -img (N, C, H, W)
-                -shiftx, shifty (N, c, H, W)
-        """
-
-        N, C, H, W = img.size()
-
-        # flatten all (all restored as Tensors)
-        flat_shiftx = shiftx.view(-1)
-        flat_shifty = shifty.view(-1)
-        flat_basex = (
-            torch.arange(0, H, requires_grad=False)
-            .view(-1, 1)[None, None]
-            .cuda()
-            .long()
-            .repeat(N, C, 1, W)
-            .view(-1)
-        )
-        flat_basey = (
-            torch.arange(0, W, requires_grad=False)
-            .view(1, -1)[None, None]
-            .cuda()
-            .long()
-            .repeat(N, C, H, 1)
-            .view(-1)
-        )
-        flat_weight = weight.view(-1)
-        flat_img = img.view(-1)
-
-        # The corresponding positions in I1
-        idxn = (
-            torch.arange(0, N, requires_grad=False)
-            .view(N, 1, 1, 1)
-            .long()
-            .cuda()
-            .repeat(1, C, H, W)
-            .view(-1)
-        )
-        idxc = (
-            torch.arange(0, C, requires_grad=False)
-            .view(1, C, 1, 1)
-            .long()
-            .cuda()
-            .repeat(N, 1, H, W)
-            .view(-1)
-        )
-        # ttype = flat_basex.type()
-        idxx = flat_shiftx.long() + flat_basex
-        idxy = flat_shifty.long() + flat_basey
-
-        # recording the inside part the shifted
-        mask = idxx.ge(0) & idxx.lt(H) & idxy.ge(0) & idxy.lt(W)
-
-        # Mask off points out of boundaries
-        ids = idxn * C * H * W + idxc * H * W + idxx * W + idxy
-        ids_mask = torch.masked_select(ids, mask).clone().cuda()
-
-        # (zero part - gt) -> difference
-        # difference back propagate -> No influence! Whether we do need mask? mask?
-        # put (add) them together
-        # Note here! accmulate fla must be true for proper bp
-        img_warp = torch.zeros(
-            [
-                N * C * H * W,
-            ]
-        ).cuda()
-        img_warp.put_(
-            ids_mask, torch.masked_select(flat_img * flat_weight, mask), accumulate=True
-        )
-
-        one_warp = torch.zeros(
-            [
-                N * C * H * W,
-            ]
-        ).cuda()
-        one_warp.put_(ids_mask, torch.masked_select(flat_weight, mask), accumulate=True)
-
-        return img_warp.view(N, C, H, W), one_warp.view(N, C, H, W)
-
-
 def interpolate_trajectory(points, n_points):
     x = [point[0] for point in points]
     y = [point[1] for point in points]
@@ -310,7 +163,7 @@ class Drag:
         )
         import json
 
-        with open(".//inspire/hdd/ws-f4d69b29-e0a5-44e6-bd92-acf4de9990f0/public-project/pengzimian-241108540199/model/Motion-I2V/models/stage1/StableDiffusion-FlowGen/vae/config.json", "r") as f:
+        with open("/inspire/hdd/ws-f4d69b29-e0a5-44e6-bd92-acf4de9990f0/public-project/pengzimian-241108540199/model/Motion-I2V/models/stage1/StableDiffusion-FlowGen/vae/config.json", "r") as f:
             vae_config = json.load(f)
         vae = AutoencoderKL.from_config(vae_config)
         vae_pretrained_path = (
@@ -512,7 +365,8 @@ class Drag:
         flow_unit_id,
         prompt,
     ):
-        original_width, original_height = 512, 320
+        original_width, original_height = self.width, self.height
+        
 
         brush_mask = image_brush["mask"]
 
@@ -536,7 +390,7 @@ class Drag:
 
         brush_mask = brush_mask.unsqueeze(0).unsqueeze(3)
 
-        input_all_points = tracking_points.constructor_args["value"]
+        input_all_points = tracking_points
         resized_all_points = [
             tuple(
                 [
@@ -627,6 +481,9 @@ class Drag:
         first_frames_transform = transforms.Compose(
             [
                 lambda x: Image.fromarray(x),
+                # transforms.Resize((320, 512)), # 直接裁剪到 320x512
+                transforms.Resize(320, interpolation=transforms.InterpolationMode.BILINEAR),  # 按最短边缩放到 320
+                transforms.CenterCrop((320, 512)),  # 中心裁剪到 320x512
                 transforms.ToTensor(),
             ]
         )
@@ -682,300 +539,42 @@ class Drag:
 
         return visualized_drag[0], outputs_path
 
+if __name__ == "__main__":
+    # 你也可以使用 argparse 来接收命令行输入，这里给出一个最简单的写法：
+    # 1. 初始化 Drag
+    device = "cuda:0"
+    pretrained_model_path = "/inspire/hdd/ws-f4d69b29-e0a5-44e6-bd92-acf4de9990f0/public-project/pengzimian-241108540199/model/Motion-I2V/models/stage1/StableDiffusion-FlowGen"
+    inference_config = "configs/configs_flowgen/inference/inference.yaml"
+    height, width = 320, 512
+    # height, width = 1920, 1080
+    model_length = 16
+    DragNUWA_net = Drag(device, pretrained_model_path, inference_config, height, width, model_length)
 
-with gr.Blocks() as demo:
-    gr.Markdown("""<h1 align="center">Motion-I2V</h1><br>""")
+    # 2. 构造一些假输入
+    first_frame_path = "/inspire/hdd/ws-f4d69b29-e0a5-44e6-bd92-acf4de9990f0/public-project/pengzimian-241108540199/project/Motion-I2V/test_imgs/bear/00000.jpg"
+    #   如果完全不需要mask，可以给一张纯黑图( shape=[H,W,3] )即可
+    brush_mask_array = np.zeros((height, width, 3), dtype=np.uint8)  # 全0
+    image_brush = {
+        "mask": brush_mask_array 
+        # cv2.imread("your_brush_mask.png", cv2.IMREAD_UNCHANGED)
+    }
+    # 假设 tracking_points 就是几条路径，每条路径是若干 (x, y) 坐标
+    tracking_points =  [
+        [(100,100), (150,150)],   # 第一条 drag
+        [(200,120), (220,150)],  # 第二条 drag
+    ]
+  
+    inference_batch_size = 1
+    flow_unit_id = 64
+    prompt = "A beer"
 
-    gr.Markdown(
-        """ Gradio Demo for <a href='https://arxiv.org/abs/2401.15977'><b> [SIGGRAPH 2024] Motion-I2V: Consistent and Controllable Image-to-Video Generation with Explicit Motion Modeling</b></a>.<br>
-    The gradio demo is adapted from the gradio demo of DragNuWA. <br>"""
+    # 3. 开始推理
+    visualized_drag_img, output_video_path = DragNUWA_net.run(
+        first_frame_path,
+        image_brush,
+        tracking_points,
+        inference_batch_size,
+        flow_unit_id,
+        prompt
     )
-
-    gr.Image(label="DragNUWA", value="assets/Figure1.gif")
-
-    gr.Markdown(
-        """## Usage: <br>
-                0. Upload an image via the "Upload Image" button.<br>
-                2. Drags & Motion Brush.<br>
-                    2.1. Click "Add Drag" when you want to add a control path.<br>
-                    2.2. You can click several points which forms a path.<br>
-                    2.3. Click "Delete last drag" to delete the whole lastest path.<br>
-                    2.4. Click "Delete last step" to delete the lastest clicked control point.<br>
-                    2.5 Add mask to select the moveable regions. If no mask, all regions are set to movable.<br>
-                3. Animate the image according the path with a click on "Run" button. <br>"""
-    )
-
-    DragNUWA_net = Drag(
-        "cuda:0",
-        "/inspire/hdd/ws-f4d69b29-e0a5-44e6-bd92-acf4de9990f0/public-project/pengzimian-241108540199/model/Motion-I2V/models/stage1/StableDiffusion-FlowGen",
-        "configs/configs_flowgen/inference/inference.yaml",
-        320,
-        512,
-        16,
-    )
-    first_frame_path = gr.State()
-    tracking_points = gr.State([])
-
-    def reset_states(first_frame_path, tracking_points):
-        first_frame_path = gr.State()
-        tracking_points = gr.State([])
-        return first_frame_path, tracking_points
-
-    def preprocess_image(image):
-        image_pil = image2pil(image.name)
-        raw_w, raw_h = image_pil.size
-        resize_ratio = max(512 / raw_w, 320 / raw_h)
-        image_pil = image_pil.resize(
-            (int(raw_w * resize_ratio), int(raw_h * resize_ratio)), Image.BILINEAR
-        )
-        image_pil = transforms.CenterCrop((320, 512))(image_pil.convert("RGB"))
-
-        first_frame_path = os.path.join(
-            output_dir, f"first_frame_{str(uuid.uuid4())[:4]}.png"
-        )
-        image_pil.save(first_frame_path)
-
-        return first_frame_path, first_frame_path, first_frame_path, gr.State([])
-
-    def add_drag(tracking_points):
-        tracking_points.constructor_args["value"].append([])
-        return tracking_points
-
-    def delete_last_drag(tracking_points, first_frame_path):
-        tracking_points.constructor_args["value"].pop()
-        transparent_background = Image.open(first_frame_path).convert("RGBA")
-        w, h = transparent_background.size
-        transparent_layer = np.zeros((h, w, 4))
-        for track in tracking_points.constructor_args["value"]:
-            if len(track) > 1:
-                for i in range(len(track) - 1):
-                    start_point = track[i]
-                    end_point = track[i + 1]
-                    vx = end_point[0] - start_point[0]
-                    vy = end_point[1] - start_point[1]
-                    arrow_length = np.sqrt(vx**2 + vy**2)
-                    if i == len(track) - 2:
-                        cv2.arrowedLine(
-                            transparent_layer,
-                            tuple(start_point),
-                            tuple(end_point),
-                            (255, 0, 0, 255),
-                            2,
-                            tipLength=8 / arrow_length,
-                        )
-                    else:
-                        cv2.line(
-                            transparent_layer,
-                            tuple(start_point),
-                            tuple(end_point),
-                            (255, 0, 0, 255),
-                            2,
-                        )
-            else:
-                cv2.circle(transparent_layer, tuple(track[0]), 5, (255, 0, 0, 255), -1)
-
-        transparent_layer = Image.fromarray(transparent_layer.astype(np.uint8))
-        trajectory_map = Image.alpha_composite(
-            transparent_background, transparent_layer
-        )
-        return tracking_points, trajectory_map
-
-    def delete_last_step(tracking_points, first_frame_path):
-        tracking_points.constructor_args["value"][-1].pop()
-        transparent_background = Image.open(first_frame_path).convert("RGBA")
-        w, h = transparent_background.size
-        transparent_layer = np.zeros((h, w, 4))
-        for track in tracking_points.constructor_args["value"]:
-            if len(track) > 1:
-                for i in range(len(track) - 1):
-                    start_point = track[i]
-                    end_point = track[i + 1]
-                    vx = end_point[0] - start_point[0]
-                    vy = end_point[1] - start_point[1]
-                    arrow_length = np.sqrt(vx**2 + vy**2)
-                    if i == len(track) - 2:
-                        cv2.arrowedLine(
-                            transparent_layer,
-                            tuple(start_point),
-                            tuple(end_point),
-                            (255, 0, 0, 255),
-                            2,
-                            tipLength=8 / arrow_length,
-                        )
-                    else:
-                        cv2.line(
-                            transparent_layer,
-                            tuple(start_point),
-                            tuple(end_point),
-                            (255, 0, 0, 255),
-                            2,
-                        )
-            else:
-                cv2.circle(transparent_layer, tuple(track[0]), 5, (255, 0, 0, 255), -1)
-
-        transparent_layer = Image.fromarray(transparent_layer.astype(np.uint8))
-        trajectory_map = Image.alpha_composite(
-            transparent_background, transparent_layer
-        )
-        return tracking_points, trajectory_map
-
-    def add_tracking_points(
-        tracking_points, first_frame_path, evt: gr.SelectData
-    ):  # SelectData is a subclass of EventData
-        print(f"You selected {evt.value} at {evt.index} from {evt.target}")
-        tracking_points.constructor_args["value"][-1].append(evt.index)
-
-        transparent_background = Image.open(first_frame_path).convert("RGBA")
-        w, h = transparent_background.size
-        transparent_layer = np.zeros((h, w, 4))
-        for track in tracking_points.constructor_args["value"]:
-            if len(track) > 1:
-                for i in range(len(track) - 1):
-                    start_point = track[i]
-                    end_point = track[i + 1]
-                    vx = end_point[0] - start_point[0]
-                    vy = end_point[1] - start_point[1]
-                    arrow_length = np.sqrt(vx**2 + vy**2)
-                    if i == len(track) - 2:
-                        cv2.arrowedLine(
-                            transparent_layer,
-                            tuple(start_point),
-                            tuple(end_point),
-                            (255, 0, 0, 255),
-                            2,
-                            tipLength=8 / arrow_length,
-                        )
-                    else:
-                        cv2.line(
-                            transparent_layer,
-                            tuple(start_point),
-                            tuple(end_point),
-                            (255, 0, 0, 255),
-                            2,
-                        )
-            else:
-                cv2.circle(transparent_layer, tuple(track[0]), 5, (255, 0, 0, 255), -1)
-
-        transparent_layer = Image.fromarray(transparent_layer.astype(np.uint8))
-        trajectory_map = Image.alpha_composite(
-            transparent_background, transparent_layer
-        )
-        return tracking_points, trajectory_map
-
-    with gr.Row():
-        with gr.Column(scale=1):
-            image_upload_button = gr.UploadButton(
-                label="Upload Image", file_types=["image"]
-            )
-            add_drag_button = gr.Button(value="Add Drag")
-            reset_button = gr.Button(value="Reset")
-            run_button = gr.Button(value="Run")
-            delete_last_drag_button = gr.Button(value="Delete last drag")
-            delete_last_step_button = gr.Button(value="Delete last step")
-
-        with gr.Column(scale=7):
-            with gr.Row():
-                with gr.Column(scale=6):
-                    input_image = gr.Image(
-                        label=None,
-                        interactive=True,
-                        height=320,
-                        width=512,
-                    )
-                with gr.Column(scale=6):
-                    output_image = gr.Image(
-                        label=None,
-                        height=320,
-                        width=512,
-                    )
-
-    with gr.Row():
-        with gr.Column(scale=1):
-            inference_batch_size = gr.Slider(
-                label="Inference Batch Size", minimum=1, maximum=1, step=1, value=1
-            )
-
-            flow_unit_id = gr.Slider(
-                label="Flow Unit", minimum=1, maximum=320, step=1, value=64
-            )
-            prompt = gr.Textbox(label="prompt")
-
-        with gr.Column(scale=5):
-            with gr.Row():
-                image_brush = gr.Image(
-                    label=None,
-                    interactive=True,
-                    height=320,
-                    width=512,
-                    type="numpy",
-                    tool="sketch",
-                )
-                output_video = gr.Image(
-                    label="Output Video",
-                    height=320,
-                    width=512,
-                )
-
-    with gr.Row():
-        gr.Markdown(
-            """
-            ## Citation
-            ```bibtex
-            @article{shi2024motion,
-            title={Motion-i2v: Consistent and controllable image-to-video generation with explicit motion modeling},
-            author={Shi, Xiaoyu and Huang, Zhaoyang and Wang, Fu-Yun and Bian, Weikang and Li, Dasong and Zhang, Yi and Zhang, Manyuan and Cheung, Ka Chun and See, Simon and Qin, Hongwei and others},
-            journal={SIGGRAPH 2024},
-            year={2024}
-            }
-            ```
-            """
-        )
-
-    image_upload_button.upload(
-        preprocess_image,
-        image_upload_button,
-        [input_image, image_brush, first_frame_path, tracking_points],
-    )
-
-    add_drag_button.click(add_drag, tracking_points, tracking_points)
-
-    delete_last_drag_button.click(
-        delete_last_drag,
-        [tracking_points, first_frame_path],
-        [tracking_points, input_image],
-    )
-
-    delete_last_step_button.click(
-        delete_last_step,
-        [tracking_points, first_frame_path],
-        [tracking_points, input_image],
-    )
-
-    reset_button.click(
-        reset_states,
-        [first_frame_path, tracking_points],
-        [first_frame_path, tracking_points],
-    )
-
-    input_image.select(
-        add_tracking_points,
-        [tracking_points, first_frame_path],
-        [tracking_points, input_image],
-    )
-
-    run_button.click(
-        DragNUWA_net.run,
-        [
-            first_frame_path,
-            image_brush,
-            tracking_points,
-            inference_batch_size,
-            flow_unit_id,
-            prompt,
-        ],
-        [output_image, output_video],
-    )
-
-gr.close_all()
-demo.queue(concurrency_count=3, max_size=20)
-demo.launch(share=True, server_name="127.0.0.1")
+    print("Done! The result video is saved at:", output_video_path)
