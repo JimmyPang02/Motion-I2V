@@ -469,14 +469,14 @@ class FlowGenPipeline(DiffusionPipeline):
         latents = latents[:, :4, ...]
 
         first_frame = first_frame[None].to(device)
-        print(first_frame.shape)
+        print(f"first_frame.shape: {first_frame.shape}")
         
         latents_img = self.vae_img.encode(first_frame.float()).latent_dist
         latents_img = latents_img.sample() * 0.18215
         latents_img = rearrange(latents_img, "(b f) c h w -> b c f h w", f=1)
         latents_img = latents_img.repeat(1, 1, video_length, 1, 1)
-        print(latents_img.shape)
-        print(latents.shape)
+        print(f"latents_img.shape: {latents_img.shape}")
+        print(f"latents.shape: {latents.shape}")
 
         # Prepare extra step kwargs.
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)

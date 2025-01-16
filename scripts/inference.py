@@ -91,7 +91,9 @@ def visualize_drag_v2(background_image_path, brush_mask, splited_tracks, width, 
 
     # Create a transparent layer with the same size as the background image
     transparent_layer = np.zeros((h, w, 4))
+    print(f"len(splited_tracks): {len(splited_tracks)}")
     for splited_track in splited_tracks:
+        print(f"len(splited_track): {len(splited_track)}")
         if len(splited_track) > 1:
             splited_track = interpolate_trajectory(splited_track, 16)
             splited_track = splited_track[:16]
@@ -101,6 +103,8 @@ def visualize_drag_v2(background_image_path, brush_mask, splited_tracks, width, 
                 vx = end_point[0] - start_point[0]
                 vy = end_point[1] - start_point[1]
                 arrow_length = np.sqrt(vx**2 + vy**2)
+                
+                # 终止位置画箭头
                 if i == len(splited_track) - 2:
                     cv2.arrowedLine(
                         transparent_layer,
@@ -110,6 +114,7 @@ def visualize_drag_v2(background_image_path, brush_mask, splited_tracks, width, 
                         2,
                         tipLength=8 / arrow_length,
                     )
+                # 其它位置画红线
                 else:
                     cv2.line(
                         transparent_layer, start_point, end_point, (255, 0, 0, 192), 2
@@ -129,7 +134,15 @@ def visualize_drag_v2(background_image_path, brush_mask, splited_tracks, width, 
     return trajectory_maps, transparent_layer
 
 
-class Drag:
+class Singleton(type):
+    _instances = {}
+    def __call__(cls, *args, **kwargs):
+        if cls not in cls._instances:
+            cls._instances[cls] = super(Singleton, cls).__call__(*args, **kwargs)
+        return cls._instances[cls]
+    
+# 改成单例模式，保证不会重复调用
+class Drag(metaclass=Singleton):
     def __init__(
         self,
         device,
@@ -301,8 +314,10 @@ class Drag:
         mask = rearrange(mask_drag, "b l h w c -> b c l h w")
         brush_mask = rearrange(brush_mask, "b l h w c -> b c l h w")
 
-        sparse_flow = drag
-        sparse_mask = mask
+        sparse_flow = drag # input_drag就是输入tracking point处理得到的光流
+        sparse_mask = mask # mask_drag 总之也跟输入mask有关
+        print(f"sparse_flow.shape: {sparse_flow.shape}")
+        print(f"sparse_mask.shape: {sparse_mask.shape}")
 
         sparse_flow = (sparse_flow - 1 / 2) * sparse_mask + 1 / 2
 
@@ -315,10 +330,12 @@ class Drag:
         )
         # flow_mask_latent = vae.encode(sparse_flow).latent_dist.sample()*0.18215
         sparse_mask = F.interpolate(sparse_mask, scale_factor=(1, 1 / 8, 1 / 8))
-        control = torch.cat([flow_mask_latent, sparse_mask], dim=1)
+        control = torch.cat([flow_mask_latent, sparse_mask], dim=1) # flow_mask_latent就是
         # print(drag)
         stride = list(range(8, 121, 8))
 
+        # （1）FlowGenPipeline
+        # 有意思，它是先生成一个flow_pre，生成运动场或流场数据，这些数据描述了图像中像素的运动信息
         sample = self.pipeline(
             prompt,
             first_frame=input_first_frame.squeeze(0),
@@ -341,6 +358,9 @@ class Drag:
         flow_pre = torch.cat(
             [torch.zeros(1, 2, h, w).to(flow_pre.device), flow_pre], dim=0
         )
+        
+        # （2）然后再生成AnimationPipeline
+        # 利用生成的流场数据和初始帧，结合文本提示，生成最终的动画视频。
         sample = self.animate_pipeline(
             prompt,
             first_frame=input_first_frame.squeeze(0) * 2 - 1,
@@ -455,6 +475,9 @@ class Drag:
                     ),
                 ] = 1
 
+        print(f"input_drag.shape: {input_drag.shape}")
+        print(f"mask_drag.shape: {mask_drag.shape}")
+        
         input_drag[..., 0] /= self.width
         input_drag[..., 1] /= self.height
 
@@ -464,6 +487,8 @@ class Drag:
         input_drag = (input_drag + 1) / 2
         dir, base, ext = split_filename(first_frame_path)
         id = base.split("_")[-1]
+        
+        id = first_frame_path.split("/")[-3] # 获取video_Id
 
         image_pil = image2pil(first_frame_path)
         image_pil = image_pil.resize((self.width, self.height), Image.BILINEAR).convert(
@@ -477,13 +502,19 @@ class Drag:
             self.width,
             self.height,
         )
+        outputs_path = f"visualized_drag/{id}.png"
+        output_dir = os.path.dirname(outputs_path)
+        # Create the directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        visualized_drag[0].save(outputs_path)
+        
 
         first_frames_transform = transforms.Compose(
             [
                 lambda x: Image.fromarray(x),
-                # transforms.Resize((320, 512)), # 直接裁剪到 320x512
-                transforms.Resize(320, interpolation=transforms.InterpolationMode.BILINEAR),  # 按最短边缩放到 320
-                transforms.CenterCrop((320, 512)),  # 中心裁剪到 320x512
+                transforms.Resize((320, 512)), # 直接裁剪到 320x512
+                # transforms.Resize(320, interpolation=transforms.InterpolationMode.BILINEAR),  # 按最短边缩放到 320
+                # transforms.CenterCrop((320, 512)),  # 中心裁剪到 320x512
                 transforms.ToTensor(),
             ]
         )
@@ -504,8 +535,10 @@ class Drag:
             else:
                 first_frames = outputs[:, -1]
 
+            # 输入模型
             outputs = self.forward_sample(
                 repeat(
+                    # 输入tracking points
                     input_drag[
                         i * (self.model_length - 1) : (i + 1) * (self.model_length - 1)
                     ],
@@ -513,6 +546,7 @@ class Drag:
                     b=inference_batch_size,
                 ).to(self.device),
                 repeat(
+                    # 输入tracking point 和 mask的合并
                     mask_drag[
                         i * (self.model_length - 1) : (i + 1) * (self.model_length - 1)
                     ],
@@ -520,6 +554,7 @@ class Drag:
                     b=inference_batch_size,
                 ).to(self.device),
                 repeat(
+                    # 输入mask
                     brush_mask[
                         i * (self.model_length - 1) : (i + 1) * (self.model_length - 1)
                     ],
@@ -534,39 +569,35 @@ class Drag:
             )
             ouput_video_list.append(outputs)
 
-        outputs_path = f"gradio/samples/output_{id}.gif"
+        outputs_path = f"outputs/{id}.mp4"
         save_videos_grid(outputs, outputs_path)
 
         return visualized_drag[0], outputs_path
 
-if __name__ == "__main__":
-    # 你也可以使用 argparse 来接收命令行输入，这里给出一个最简单的写法：
+def run_motioni2v_inference(image_path,height,width,model_length,traj,caption):
+
     # 1. 初始化 Drag
-    device = "cuda:0"
+    device = "cuda"
     pretrained_model_path = "/inspire/hdd/ws-f4d69b29-e0a5-44e6-bd92-acf4de9990f0/public-project/pengzimian-241108540199/model/Motion-I2V/models/stage1/StableDiffusion-FlowGen"
     inference_config = "configs/configs_flowgen/inference/inference.yaml"
-    height, width = 320, 512
+    height, width = height,width
     # height, width = 1920, 1080
-    model_length = 16
-    DragNUWA_net = Drag(device, pretrained_model_path, inference_config, height, width, model_length)
+    model_length = model_length
+    DragNUWA_net = Drag(device, pretrained_model_path, inference_config, height, width, model_length) # 单例模式 
 
-    # 2. 构造一些假输入
-    first_frame_path = "/inspire/hdd/ws-f4d69b29-e0a5-44e6-bd92-acf4de9990f0/public-project/pengzimian-241108540199/project/Motion-I2V/test_imgs/bear/00000.jpg"
-    #   如果完全不需要mask，可以给一张纯黑图( shape=[H,W,3] )即可
-    brush_mask_array = np.zeros((height, width, 3), dtype=np.uint8)  # 全0
+    # 2. 输入
+    first_frame_path = image_path
+    tracking_points = traj.permute(1,0,2) # 把point_num放到第一才能对上
+    prompt = caption
+    brush_mask_array = np.zeros((height, width, 3), dtype=np.uint8)  #   如果完全不需要mask，可以给一张纯黑图( shape=[H,W,3] )即可
     image_brush = {
         "mask": brush_mask_array 
         # cv2.imread("your_brush_mask.png", cv2.IMREAD_UNCHANGED)
     }
-    # 假设 tracking_points 就是几条路径，每条路径是若干 (x, y) 坐标
-    tracking_points =  [
-        [(100,100), (150,150)],   # 第一条 drag
-        [(200,120), (220,150)],  # 第二条 drag
-    ]
   
     inference_batch_size = 1
     flow_unit_id = 64
-    prompt = "A beer"
+    
 
     # 3. 开始推理
     visualized_drag_img, output_video_path = DragNUWA_net.run(
@@ -577,4 +608,22 @@ if __name__ == "__main__":
         flow_unit_id,
         prompt
     )
-    print("Done! The result video is saved at:", output_video_path)
+    print("Done! The result video is saved at:", output_video_path)    
+
+
+if __name__ == "__main__":
+    first_frame_path = "/inspire/hdd/ws-f4d69b29-e0a5-44e6-bd92-acf4de9990f0/public-project/pengzimian-241108540199/project/Motion-I2V_evaluate/test_imgs/bear/00000.jpg"
+    height, width = 320, 512
+    model_length = 16
+    tracking_points =  [
+        [(100,100), (150,150)],   # 第一条 drag
+        [(200,120), (220,150)],  # 第二条 drag
+    ]    
+    prompt = "A beer"
+    run_motioni2v_inference(
+        image_path=first_frame_path,
+        height=height,
+        width=width,
+        model_length=model_length,
+        traj=tracking_points,
+        caption=prompt)
